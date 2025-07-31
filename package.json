@@ -1,5 +1,5 @@
 {
-  "type":"module",
+  "type": "module",
   "name": "teams_plugin",
   "version": "1.0.0",
   "main": "index.js",
@@ -14,6 +14,7 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
+    "@types/cors": "^2.8.19",
     "@types/node": "^24.1.0",
     "typescript": "^5.8.3"
   },
@@ -21,6 +22,7 @@
     "@azure/msal-node": "^3.6.4",
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "@types/express-session": "^1.18.2",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "express-session": "^1.18.2"
