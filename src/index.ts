@@ -23,7 +23,7 @@ const msalInstance = new ConfidentialClientApplication(config);
 app.use("/auth/signin", async (req, res)=>{
     const authCodeUrlParameters = {
         scopes: ["Calendars.ReadWrite", "Calendars.ReadWrite.Shared"],
-        redirectUri: process.env.REDIRECT_URI!,
+        redirectUri: process.env.AZURE_REDIRECT_URI!,
     }
     try {
         const authUrl = await msalInstance.getAuthCodeUrl(authCodeUrlParameters);
@@ -38,7 +38,7 @@ app.use("/auth/callback", async (req, res) => {
      const tokenRequest: AuthorizationCodeRequest = {
         code: req.query.code as string,
         scopes: ["Calendars.Read"],
-        redirectUri: process.env.REDIRECT_URI!,
+        redirectUri: process.env.AZURE_REDIRECT_URI!,
     };
     try {
         const response = await msalInstance.acquireTokenByCode(tokenRequest);
