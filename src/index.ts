@@ -17,6 +17,8 @@ app.use(cors({
   credentials: true, 
   }));
 
+const userTokenCacheStore: { [key: string]: string } = {};
+
 app.use(session({
     secret: process.env.SESSION_SECRET!,
     resave: false,
@@ -28,9 +30,9 @@ app.use(session({
 
 const msalInstance = new ConfidentialClientApplication(config);
 
-app.use("/auth/signin", async (req, res)=>{
+app.get("/auth/signin", async (req, res)=>{
     const authCodeUrlParameters = {
-        scopes: ["Calendars.ReadWrite", "Calendars.ReadWrite.Shared"],
+        scopes: ["Calendars.ReadWrite", "Calendars.ReadWrite.Shared", "offline_access"],
         redirectUri: process.env.AZURE_REDIRECT_URI!,
         prompt: "consent" 
     }
@@ -43,7 +45,7 @@ app.use("/auth/signin", async (req, res)=>{
     }
 })
 
-app.use("/auth/callback", async (req, res) => {
+app.get("/auth/callback", async (req, res) => {
      const tokenRequest: AuthorizationCodeRequest = {
         code: req.query.code as string,
         scopes: ["Calendars.ReadWrite", "Calendars.ReadWrite.Shared"],
@@ -53,11 +55,56 @@ app.use("/auth/callback", async (req, res) => {
         const response = await msalInstance.acquireTokenByCode(tokenRequest);
         (req.session as any).accessToken = response!.accessToken;
         (req.session as any).account = response!.account;
-        res.redirect("/calendar")
+        const accountId = response!.account?.homeAccountId || "defaultAccountId";
+
+        userTokenCacheStore[accountId] = msalInstance.getTokenCache().serialize();
+        console.log(`Token cache for user ${accountId} has been stored.`);
+
+        res.redirect("/subscribe")
     } catch (error) {
         console.error("Error acquiring token by code:", error);
         res.status(500).send("Internal Server Error from /auth/callback");
     }
+})
+
+app.get("/subscribe", async(req, res)=>{
+    const accessToken = (req.session as any).accessToken;
+    if (!accessToken) {
+        return res.redirect('/auth/signin');
+    }
+
+    const subscription = {
+        changeType: 'created,updated,deleted',
+        notificationUrl: ' https://0f1ed5e478e8.ngrok-free.app/webhook-listener', 
+        resource: '/me/events', 
+        expirationDateTime: new Date(Date.now() + 86400000).toISOString(), // 24 hours from now
+        clientState: process.env.CLIENT_STATE_SECRET 
+    };
+     try {
+        const graphClient = authenticatedGraphClient(accessToken);
+        const result = await graphClient.api('/subscriptions').post(subscription);
+
+        console.log('Successfully created subscription:', result);
+        res.send(`<h2>Setup Complete!</h2><p>Your application is now listening for changes to your calendar. You can close this window. Any new events or changes will be logged in the server console.</p>`);
+    } catch (error: any) {
+        console.error('Error creating subscription:', error);
+        res.status(500).send('Error creating subscription. Check your server logs and ngrok URL.');
+    }
+})
+
+app.get("/webhook-listener", async(req, res)=>{
+     const validationToken = req.query.validationToken;
+    if (validationToken) {
+        console.log("Received validation request from Microsoft Graph. Responding to prove ownership.");
+        res.status(200).send(validationToken);
+        return;
+    }
+
+    const notification = req.body.value[0];
+    console.log(`\nReceived a change notification! Resource: ${notification.resource}`);
+
+    // Acknowledge the request immediately. This is a requirement.
+    res.status(202).send();
 })
 
 app.use("/calendar", async (req, res) => {
