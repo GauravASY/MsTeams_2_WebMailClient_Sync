@@ -4,11 +4,31 @@ import session from 'express-session';
 import { ConfidentialClientApplication, AuthorizationCodeRequest } from '@azure/msal-node';
 import {config} from './auth-config.ts';
 import { authenticatedGraphClient } from './graph-helper.ts';
+import { renewSubscription } from './webhook.ts';
 import cors from 'cors';
+import cron from 'node-cron';
+import { userDataCache } from './utils.ts';
 dotenv.config();
 
 const app = express();
 const PORT = process.env.SERVER_PORT || 3000;
+
+cron.schedule('0 2 * * *', () => {
+    console.log('\nRunning daily subscription renewal job...');
+    
+    const allUserIds = Object.keys(userDataCacheStore);
+    if (allUserIds.length === 0) {
+        console.log("No users in store. Skipping renewal job.");
+        return;
+    }
+
+    allUserIds.forEach(userId => {
+        renewSubscription(userId);
+    });
+
+}, {
+    timezone: "Asia/Kolkata"
+}); 
 
 app.use(express.json());
 app.use(cors({
@@ -17,7 +37,8 @@ app.use(cors({
   credentials: true, 
   }));
 
-const userTokenCacheStore: { [key: string]: string } = {};
+export const userDataCacheStore: { [key: string]: userDataCache } = {};
+export const subIdMap = new Map<string, string>();
 
 app.use(session({
     secret: process.env.SESSION_SECRET!,
@@ -56,8 +77,13 @@ app.get("/auth/callback", async (req, res) => {
         (req.session as any).accessToken = response!.accessToken;
         (req.session as any).account = response!.account;
         const accountId = response!.account?.homeAccountId || "defaultAccountId";
-
-        userTokenCacheStore[accountId] = msalInstance.getTokenCache().serialize();
+        if (!userDataCacheStore[accountId]) {
+            userDataCacheStore[accountId] = {
+                tokenCache: '',
+                subscriptionId: '' 
+            };
+        }
+        userDataCacheStore[accountId].tokenCache = msalInstance.getTokenCache().serialize();
         console.log(`Token cache for user ${accountId} has been stored.`);
 
         res.redirect("/subscribe")
@@ -75,7 +101,7 @@ app.get("/subscribe", async(req, res)=>{
 
     const subscription = {
         changeType: 'created,updated,deleted',
-        notificationUrl: ' https://0f1ed5e478e8.ngrok-free.app/webhook-listener', 
+        notificationUrl: 'https://c762f0263ba0.ngrok-free.app/webhook-listener', 
         resource: '/me/events', 
         expirationDateTime: new Date(Date.now() + 86400000).toISOString(), // 24 hours from now
         clientState: process.env.CLIENT_STATE_SECRET 
@@ -83,7 +109,11 @@ app.get("/subscribe", async(req, res)=>{
      try {
         const graphClient = authenticatedGraphClient(accessToken);
         const result = await graphClient.api('/subscriptions').post(subscription);
-
+        const accountId = (req.session as any).account?.homeAccountId ;
+        if(userDataCacheStore[accountId]) {
+            userDataCacheStore[accountId].subscriptionId = result.id;
+        }
+        subIdMap.set(result.id, accountId);
         console.log('Successfully created subscription:', result);
         res.send(`<h2>Setup Complete!</h2><p>Your application is now listening for changes to your calendar. You can close this window. Any new events or changes will be logged in the server console.</p>`);
     } catch (error: any) {
@@ -92,7 +122,7 @@ app.get("/subscribe", async(req, res)=>{
     }
 })
 
-app.get("/webhook-listener", async(req, res)=>{
+app.use("/webhook-listener", async(req, res)=>{
      const validationToken = req.query.validationToken;
     if (validationToken) {
         console.log("Received validation request from Microsoft Graph. Responding to prove ownership.");
@@ -105,6 +135,52 @@ app.get("/webhook-listener", async(req, res)=>{
 
     // Acknowledge the request immediately. This is a requirement.
     res.status(202).send();
+
+    if (notification.clientState !== process.env.CLIENT_STATE_SECRET) {
+        console.error("Received notification with invalid clientState.");
+        return;
+    }
+    const userIdFromNotification = notification.subscriptionId
+    const userHomeAccountId = subIdMap.get(userIdFromNotification);
+    if (!userHomeAccountId) {
+        console.error(`Could not find homeAccountId for subscriptionId ${userIdFromNotification}.`);
+        return;
+    }
+
+    const userTokenCache = userDataCacheStore[userHomeAccountId].tokenCache;
+    if (!userTokenCache) {
+        console.error(`Could not find a token cache for user.`);
+        return;
+    }
+    const tempMsalInstance = new ConfidentialClientApplication(config);
+    tempMsalInstance.getTokenCache().deserialize(userTokenCache);
+    try {
+        const account = (await tempMsalInstance.getTokenCache().getAllAccounts())
+            .find(a => a.homeAccountId === userHomeAccountId);
+
+        if (!account) throw new Error("Could not find account in the deserialized cache.");
+        
+        // Silently acquire a token. MSAL uses the stored refresh token to get a new access token.
+        const tokenResponse = await tempMsalInstance.acquireTokenSilent({
+            account: account,
+            scopes: ["Calendars.ReadWrite", "Calendars.ReadWrite.Shared"],
+        });
+        
+        console.log("Silently acquired a fresh access token to process the webhook.");
+        const graphClient = authenticatedGraphClient(tokenResponse!.accessToken);
+
+        if(notification.changeType === 'deleted') {
+            console.log(`---> The event with Id "${notification.subscriptionId}" was deleted.`); 
+        }
+        else{
+            const eventDetails = await graphClient.api(notification.resource).get();
+            console.log(`---> Fetched details for event "${eventDetails.subject}" which was ${notification.changeType}.`);
+        }
+
+        userDataCacheStore[userHomeAccountId].tokenCache = tempMsalInstance.getTokenCache().serialize();
+    } catch (error) {
+        console.error("Error processing notification:", error);
+    }
 })
 
 app.use("/calendar", async (req, res) => {
