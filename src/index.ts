@@ -8,6 +8,7 @@ import { renewSubscription } from './webhook.ts';
 import cors from 'cors';
 import cron from 'node-cron';
 import { userDataCache } from './utils.ts';
+import { fetchCalendarEvents } from './caldav.ts';
 dotenv.config();
 
 const app = express();
@@ -101,7 +102,7 @@ app.get("/subscribe", async(req, res)=>{
 
     const subscription = {
         changeType: 'created,updated,deleted',
-        notificationUrl: 'https://c762f0263ba0.ngrok-free.app/webhook-listener', 
+        notificationUrl: 'https://dd2bc119536b.ngrok-free.app/webhook-listener', 
         resource: '/me/events', 
         expirationDateTime: new Date(Date.now() + 86400000).toISOString(), // 24 hours from now
         clientState: process.env.CLIENT_STATE_SECRET 
@@ -178,6 +179,7 @@ app.use("/webhook-listener", async(req, res)=>{
         }
 
         userDataCacheStore[userHomeAccountId].tokenCache = tempMsalInstance.getTokenCache().serialize();
+        fetchCalendarEvents();
     } catch (error) {
         console.error("Error processing notification:", error);
     }
